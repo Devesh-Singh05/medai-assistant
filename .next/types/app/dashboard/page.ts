@@ -1,4 +1,4 @@
-// File: E:\New RBL\medai-assist\app\dashboard\page.tsx
+// File: E:\medai-assistant\app\dashboard\page.tsx
 import * as entry from '../../../../app/dashboard/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 
