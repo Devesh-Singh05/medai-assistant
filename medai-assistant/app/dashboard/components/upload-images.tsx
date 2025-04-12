@@ -2,14 +2,13 @@
 
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { Upload, X, Loader2 } from 'lucide-react'
+import { Upload, X, Loader2, AlertCircle, RefreshCw } from 'lucide-react'
 import Image from 'next/image'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import type { StoredScan } from '@/types/scan'
-import { saveScanToHistory } from '@/types/scan'
+import { NavLinks } from "@/components/nav-links"
 
 interface UploadedImage {
   file: File;
@@ -18,7 +17,22 @@ interface UploadedImage {
   detections?: number;
   confidences?: number[];
   isProcessing?: boolean;
+  processingStatus?: 'uploading' | 'processing' | 'loading-result';
   error?: string;
+  retryCount?: number;
+  report?: {
+    patientInfo: {
+      name: string;
+      id: string;
+      date: string;
+    };
+    scanResults: {
+      numDetections: number;
+      confidences: number[];
+    };
+    report: string;
+    generatedAt: string;
+  };
 }
 
 export default function UploadImage() {
@@ -42,78 +56,138 @@ export default function UploadImage() {
     setImages(prev => prev.filter((_, i) => i !== index))
   }
 
-  const processImage = async (image: UploadedImage, index: number) => {
-    try {
-      setImages(prev => prev.map((img, i) => 
-        i === index ? { ...img, isProcessing: true, error: undefined } : img
-      ));
+    const processImage = async (image: UploadedImage, index: number) => {
+      const maxRetries = 3;
+      const retryDelay = 1000;
 
-      const formData = new FormData();
-      formData.append('file', image.file);
-
-      const response = await fetch('/api/detect', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status}, details: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to process image');
-      }
-
-      // Save to history
-      const scanResult: StoredScan = {
-        id: Date.now().toString(),
-        patientName,
-        patientId,
-        imageType,
-        uploadTime: new Date().toISOString(),
-        processedImage: data.processedImage,
-        originalImage: image.preview,
-        numDetections: data.numDetections,
-        confidences: data.confidences,
-        status: 'completed'
+      const updateImageStatus = (
+        status: 'uploading' | 'processing' | 'loading-result' | undefined,
+        attempt?: number,
+        error?: string
+      ) => {
+        setImages(prev => prev.map((img, i) => 
+          i === index ? {
+            ...img,
+            isProcessing: status !== undefined,
+            processingStatus: status,
+            retryCount: attempt,
+            error: error
+          } : img
+        ));
       };
-      
-      saveScanToHistory(scanResult);
 
-      // Update UI
-      setImages(prev => prev.map((img, i) => 
-        i === index ? {
-          ...img,
-          isProcessing: false,
-          processedImage: data.processedImage,
-          detections: data.numDetections,
-          confidences: data.confidences
-        } : img
-      ));
+      try {
+        updateImageStatus('uploading');
+        const formData = new FormData();
+        formData.append('file', image.file);
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          try {
+            updateImageStatus(
+              attempt === 0 ? 'processing' : 'loading-result',
+              attempt
+            );
+
+            // Add patient information to form data
+            formData.append('patientName', patientName);
+            formData.append('patientId', patientId);
+            formData.append('imageType', imageType);
+
+            const response = await fetch('/api/detect', {
+              method: 'POST',
+              body: formData,
+            });
+
+            if (!response.ok) {
+              const errorData = await response.json();
+              throw new Error(errorData.error || 'Server error');
+            }
+
+            const data = await response.json();
+            console.log('API Response:', data);
+            
+            if (!data.success) {
+              throw new Error(data.error || 'Processing failed');
+            }
+
+            console.log('Report data:', data.report);
+            console.log('Image data:', data.processedImage?.substring(0, 100) + '...');
+
+            // Store the report in localStorage for recent uploads
+            try {
+              if (data.report) {
+                const newUpload = {
+                  patientName,
+                  patientId,
+                  imageType: imageType || 'brain-mri',
+                  timestamp: new Date().toISOString(),
+                  processedImage: data.processedImage,
+                  report: data.report,
+                  detections: data.numDetections,
+                  confidences: data.confidences
+                };
+
+                console.log('Saving upload to localStorage:', newUpload);
+
+                const recentUploads = JSON.parse(localStorage.getItem('recentUploads') || '[]');
+                recentUploads.unshift(newUpload);
+                
+                // Keep only last 10 uploads
+                const trimmedUploads = recentUploads.slice(0, 10);
+                localStorage.setItem('recentUploads', JSON.stringify(trimmedUploads));
+                
+                console.log('Successfully saved to localStorage');
+              } else {
+                console.warn('No report data received from API');
+              }
+            } catch (storageError) {
+              console.error('Error saving to localStorage:', storageError);
+            }
+
+            // Success - update image with report
+            setImages(prev => prev.map((img, i) => 
+              i === index ? {
+                ...img,
+                isProcessing: false,
+                processingStatus: undefined,
+                processedImage: data.processedImage,
+                detections: data.numDetections,
+                confidences: data.confidences,
+                report: data.report,
+                retryCount: undefined,
+                error: undefined
+              } : img
+            ));
+            return;
+
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            
+            if (attempt === maxRetries - 1) {
+              throw new Error(`Failed after ${maxRetries} attempts: ${errorMessage}`);
+            }
+
+            console.warn(`Attempt ${attempt + 1} failed:`, errorMessage);
+            updateImageStatus(
+              'loading-result',
+              attempt,
+              `Retrying... (${attempt + 1}/${maxRetries})`
+            );
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          }
+        }
+
+      // If we get here, all retries failed
+      throw new Error('Failed to process image after multiple attempts');
+
     } catch (error) {
-      const failedScan: StoredScan = {
-        id: Date.now().toString(),
-        patientName,
-        patientId,
-        imageType,
-        uploadTime: new Date().toISOString(),
-        processedImage: null,
-        originalImage: image.preview,
-        numDetections: 0,
-        confidences: [],
-        status: 'failed',
-        error: error instanceof Error ? error.message : 'Failed to process image'
-      };
-      
-      saveScanToHistory(failedScan);
-
       setImages(prev => prev.map((img, i) => 
         i === index ? {
           ...img,
           isProcessing: false,
-          error: error instanceof Error ? error.message : 'Failed to process image'
+          processingStatus: undefined,
+          error: error instanceof Error ? error.message : 'Failed to process image',
+          retryCount: undefined
         } : img
       ));
     }
@@ -136,13 +210,15 @@ export default function UploadImage() {
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-      className="container mx-auto p-4"
-    >
-      <h1 className="text-2xl font-bold mb-4">Upload New Images</h1>
+    <>
+      <NavLinks />
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.5 }}
+        className="container mx-auto p-4"
+      >
+        <h1 className="text-2xl font-bold mb-4">Upload New Images</h1>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
           <Label htmlFor="patientName">Patient Name</Label>
@@ -220,10 +296,7 @@ export default function UploadImage() {
                   <div className="absolute inset-0 bg-black bg-opacity-0 hover:bg-opacity-10 transition-opacity" />
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeImage(index);
-                    }}
+                    onClick={() => removeImage(index)}
                     className="absolute top-2 right-2 bg-red-500 text-white rounded-full p-1"
                     aria-label={`Remove image ${index + 1}`}
                   >
@@ -232,15 +305,48 @@ export default function UploadImage() {
                 </div>
                 
                 {image.isProcessing && (
-                  <div className="mt-2 flex items-center text-blue-500">
-                    <Loader2 className="animate-spin mr-2" size={16} />
-                    Processing...
+                  <div className="mt-2">
+                    <div className="flex items-center text-blue-500">
+                      <Loader2 className="animate-spin mr-2" size={16} />
+                      {image.processingStatus === 'uploading' ? 'Uploading...' :
+                       image.processingStatus === 'processing' ? 'Processing scan (this may take longer on CPU)...' :
+                       image.processingStatus === 'loading-result' ? 'Loading results...' :
+                       'Processing...'}
+                    </div>
+                    <div className="text-xs text-blue-400 mt-1">
+                      {image.retryCount !== undefined && image.retryCount > 0 ? (
+                        <div className="flex items-center">
+                          <RefreshCw size={12} className="mr-1" />
+                          Retry {image.retryCount}/3
+                        </div>
+                      ) : image.processingStatus === 'processing' ? (
+                        <div>Please wait, this operation may take several seconds</div>
+                      ) : null}
+                    </div>
                   </div>
                 )}
                 
                 {image.error && (
-                  <div className="mt-2 text-red-500 text-sm">
-                    Error: {image.error}
+                  <div className="mt-2">
+                    <div className="flex items-center text-red-500 text-sm font-semibold">
+                      <AlertCircle size={16} className="mr-1" />
+                      Error:
+                    </div>
+                    <div className="text-red-500 text-sm mt-1">
+                      {image.error.includes('Model not found') ? (
+                        <>
+                          Model file not found. Please ensure the YOLO model file (best.pt) 
+                          is present in the Back-end directory.
+                        </>
+                      ) : image.error.includes('Failed to read processed image') ? (
+                        <>
+                          Failed to read processed image. The system might be busy, 
+                          please try again.
+                        </>
+                      ) : (
+                        image.error
+                      )}
+                    </div>
                   </div>
                 )}
                 
@@ -273,6 +379,7 @@ export default function UploadImage() {
           type="submit" 
           className="w-full" 
           disabled={images.length === 0 || isProcessing}
+          variant={images.length === 0 ? "outline" : "default"}
         >
           {isProcessing ? (
             <>
@@ -314,6 +421,7 @@ export default function UploadImage() {
           </div>
         </div>
       )}
-    </motion.div>
+      </motion.div>
+    </>
   )
 }

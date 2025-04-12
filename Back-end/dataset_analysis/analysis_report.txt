@@ -1,0 +1,17 @@
+=== Dataset Analysis Report ===
+
+
+TRAIN SET:
+Total images: 151
+Total instances: 207
+Average instances per image: 1.37
+
+VALID SET:
+Total images: 43
+Total instances: 68
+Average instances per image: 1.58
+
+TEST SET:
+Total images: 21
+Total instances: 33
+Average instances per image: 1.57
